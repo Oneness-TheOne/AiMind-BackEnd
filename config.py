@@ -1,0 +1,28 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def required(key: str, default_value=None):
+    value = os.getenv(key, default_value)
+    if value is None or value == "":
+        raise ValueError(f"키 {key}는 undefined!!")
+    return value
+
+
+class Settings:
+    jwt_secret = required("JWT_SECRET")
+    jwt_expires_sec = int(required("JWT_EXPIRES_SEC"))
+    bcrypt_salt_rounds = int(required("BCRYPT_SALT_ROUNDS", 12))
+    host_port = int(required("HOST_PORT", 9090))
+    db_host = required("DB_HOST")
+    db_port = int(required("DB_PORT", 3306))
+    db_name = required("DB_NAME", "AiMind")
+    db_user = required("DB_USER")
+    db_password = required("DB_PASSWORD")
+    # Optional: path to CA bundle for TLS connections
+    db_ssl_ca = os.getenv("DB_SSL_CA")
+
+
+settings = Settings()
