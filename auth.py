@@ -60,3 +60,29 @@ def get_current_user_context(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=AUTH_ERROR)
 
     return {"user": user, "token": token}
+
+
+def get_optional_user_context(
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    if not (authorization and authorization.startswith("Bearer ")):
+        return {"user": None, "token": None}
+
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        decoded = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+    except jwt.PyJWTError:
+        return {"user": None, "token": None}
+
+    user_id = decoded.get("id")
+    try:
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        return {"user": None, "token": None}
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        return {"user": None, "token": None}
+
+    return {"user": user, "token": token}

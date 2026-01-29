@@ -2,13 +2,46 @@
 from datetime import datetime
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from auth import create_jwt_token, get_current_user_context, hash_password, verify_password
+from auth import (
+    create_jwt_token,
+    get_current_user_context,
+    get_optional_user_context,
+    hash_password,
+    verify_password,
+)
 from db import get_db, init_db
-from db_models import Post, User
-from models import LoginRequest, SignupRequest, PostCreateRequest, PostUpdateRequest
-from utils import serialize_post, serialize_posts
+from db_models import (
+    CommunityCategory,
+    CommunityComment,
+    CommunityPost,
+    CommunityPostBookmark,
+    CommunityPostImage,
+    CommunityPostLike,
+    CommunityPostTag,
+    CommunityTag,
+    ExpertProfile,
+    Post,
+    User,
+)
+from models import (
+    CommunityCommentCreateRequest,
+    CommunityPostCreateRequest,
+    CommunityPostUpdateRequest,
+    LoginRequest,
+    PostCreateRequest,
+    PostUpdateRequest,
+    SignupRequest,
+)
+from utils import (
+    serialize_community_comment,
+    serialize_community_post,
+    serialize_community_posts,
+    serialize_post,
+    serialize_posts,
+)
 
 app = FastAPI()
 
@@ -192,3 +225,442 @@ def delete_post(
     db.delete(existing)
     db.commit()
     return None
+
+
+@app.get("/community/categories")
+def get_community_categories(db: Session = Depends(get_db)):
+    categories = (
+        db.query(CommunityCategory)
+        .order_by(CommunityCategory.sort_order.asc(), CommunityCategory.id.asc())
+        .all()
+    )
+    return [
+        {
+            "id": category.id,
+            "slug": category.slug,
+            "label": category.label,
+            "sort_order": category.sort_order,
+        }
+        for category in categories
+    ]
+
+
+@app.get("/community/experts")
+def get_community_experts(db: Session = Depends(get_db)):
+    experts = (
+        db.query(ExpertProfile, User)
+        .join(User, User.id == ExpertProfile.user_id)
+        .order_by(ExpertProfile.answer_count.desc())
+        .all()
+    )
+    return [
+        {
+            "user_id": expert.user_id,
+            "name": user.name,
+            "title": expert.title,
+            "answer_count": expert.answer_count,
+        }
+        for expert, user in experts
+    ]
+
+
+@app.get("/community/stats")
+def get_community_stats(db: Session = Depends(get_db)):
+    users_count = db.query(func.count(User.id)).scalar() or 0
+    posts_count = db.query(func.count(CommunityPost.id)).scalar() or 0
+    comments_count = db.query(func.count(CommunityComment.id)).scalar() or 0
+    experts_count = db.query(func.count(ExpertProfile.user_id)).scalar() or 0
+    return {
+        "users": users_count,
+        "posts": posts_count,
+        "comments": comments_count,
+        "experts": experts_count,
+    }
+
+
+@app.get("/community/posts")
+def get_community_posts(
+    category: str | None = None,
+    search: str | None = None,
+    sort: str = "latest",
+    page: int = 1,
+    page_size: int = 10,
+    context=Depends(get_optional_user_context),
+    db: Session = Depends(get_db),
+):
+    query = db.query(CommunityPost).join(CommunityCategory)
+    if category and category != "all":
+        query = query.filter(CommunityCategory.slug == category)
+    if search:
+        keyword = f"%{search}%"
+        query = query.filter(
+            (CommunityPost.title.like(keyword)) | (CommunityPost.content.like(keyword))
+        )
+
+    if sort == "popular":
+        query = query.order_by(
+            CommunityPost.like_count.desc(),
+            CommunityPost.view_count.desc(),
+            CommunityPost.created_at.desc(),
+        )
+    else:
+        query = query.order_by(CommunityPost.created_at.desc())
+
+    total = query.with_entities(func.count(CommunityPost.id)).scalar() or 0
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), 50)
+    offset = (page - 1) * page_size
+
+    posts = query.offset(offset).limit(page_size).all()
+    current_user_id = context["user"].id if context.get("user") else None
+    return {
+        "items": serialize_community_posts(posts, current_user_id),
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@app.get("/community/posts/{post_id}")
+def get_community_post(
+    post_id: int,
+    context=Depends(get_optional_user_context),
+    db: Session = Depends(get_db),
+):
+    post = db.query(CommunityPost).filter(CommunityPost.id == post_id).first()
+    if not post:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"message": f"{post_id}의 게시글이 없습니다"},
+        )
+    post.view_count += 1
+    db.commit()
+    db.refresh(post)
+    current_user_id = context["user"].id if context.get("user") else None
+    return serialize_community_post(post, current_user_id)
+
+
+@app.post("/community/posts", status_code=status.HTTP_201_CREATED)
+def create_community_post(
+    payload: CommunityPostCreateRequest,
+    context=Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
+    category = (
+        db.query(CommunityCategory)
+        .filter(CommunityCategory.slug == payload.category_slug)
+        .first()
+    )
+    if not category:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": "유효하지 않은 카테고리입니다"},
+        )
+
+    now = datetime.utcnow()
+    post = CommunityPost(
+        user_id=context["user"].id,
+        category_id=category.id,
+        title=payload.title,
+        content=payload.content,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(post)
+    db.flush()
+
+    for index, image_url in enumerate(payload.images or []):
+        db.add(
+            CommunityPostImage(
+                post_id=post.id,
+                image_url=image_url,
+                sort_order=index,
+                created_at=now,
+            )
+        )
+
+    for tag_name in payload.tags or []:
+        normalized = tag_name.strip().lstrip("#")
+        if not normalized:
+            continue
+        tag = db.query(CommunityTag).filter(CommunityTag.name == normalized).first()
+        if not tag:
+            tag = CommunityTag(name=normalized, created_at=now)
+            db.add(tag)
+            db.flush()
+        db.add(
+            CommunityPostTag(
+                post_id=post.id,
+                tag_id=tag.id,
+                created_at=now,
+            )
+        )
+
+    db.commit()
+    db.refresh(post)
+    return serialize_community_post(post, context["user"].id)
+
+
+@app.put("/community/posts/{post_id}")
+def update_community_post(
+    post_id: int,
+    payload: CommunityPostUpdateRequest,
+    context=Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
+    post = db.query(CommunityPost).filter(CommunityPost.id == post_id).first()
+    if not post:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"message": f"{post_id}의 게시글이 없습니다"},
+        )
+    if post.user_id != context["user"].id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+
+    if payload.category_slug:
+        category = (
+            db.query(CommunityCategory)
+            .filter(CommunityCategory.slug == payload.category_slug)
+            .first()
+        )
+        if not category:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"message": "유효하지 않은 카테고리입니다"},
+            )
+        post.category_id = category.id
+
+    if payload.title is not None:
+        post.title = payload.title
+    if payload.content is not None:
+        post.content = payload.content
+    post.updated_at = datetime.utcnow()
+
+    if payload.images is not None:
+        db.query(CommunityPostImage).filter(
+            CommunityPostImage.post_id == post.id
+        ).delete()
+        for index, image_url in enumerate(payload.images):
+            db.add(
+                CommunityPostImage(
+                    post_id=post.id,
+                    image_url=image_url,
+                    sort_order=index,
+                    created_at=post.updated_at,
+                )
+            )
+
+    if payload.tags is not None:
+        db.query(CommunityPostTag).filter(
+            CommunityPostTag.post_id == post.id
+        ).delete()
+        for tag_name in payload.tags:
+            normalized = tag_name.strip().lstrip("#")
+            if not normalized:
+                continue
+            tag = (
+                db.query(CommunityTag).filter(CommunityTag.name == normalized).first()
+            )
+            if not tag:
+                tag = CommunityTag(name=normalized, created_at=post.updated_at)
+                db.add(tag)
+                db.flush()
+            db.add(
+                CommunityPostTag(
+                    post_id=post.id,
+                    tag_id=tag.id,
+                    created_at=post.updated_at,
+                )
+            )
+
+    db.commit()
+    db.refresh(post)
+    return serialize_community_post(post, context["user"].id)
+
+
+@app.delete("/community/posts/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_community_post(
+    post_id: int,
+    context=Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
+    post = db.query(CommunityPost).filter(CommunityPost.id == post_id).first()
+    if not post:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"message": f"{post_id}의 게시글이 없습니다"},
+        )
+    if post.user_id != context["user"].id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+
+    db.query(CommunityPostImage).filter(
+        CommunityPostImage.post_id == post.id
+    ).delete()
+    db.query(CommunityPostTag).filter(CommunityPostTag.post_id == post.id).delete()
+    db.query(CommunityComment).filter(CommunityComment.post_id == post.id).delete()
+    db.query(CommunityPostLike).filter(CommunityPostLike.post_id == post.id).delete()
+    db.query(CommunityPostBookmark).filter(
+        CommunityPostBookmark.post_id == post.id
+    ).delete()
+    db.delete(post)
+    db.commit()
+    return None
+
+
+@app.get("/community/posts/{post_id}/comments")
+def get_community_comments(
+    post_id: int,
+    db: Session = Depends(get_db),
+):
+    comments = (
+        db.query(CommunityComment)
+        .filter(CommunityComment.post_id == post_id)
+        .order_by(CommunityComment.created_at.asc())
+        .all()
+    )
+    return [serialize_community_comment(comment) for comment in comments]
+
+
+@app.post("/community/posts/{post_id}/comments", status_code=status.HTTP_201_CREATED)
+def create_community_comment(
+    post_id: int,
+    payload: CommunityCommentCreateRequest,
+    context=Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
+    post = db.query(CommunityPost).filter(CommunityPost.id == post_id).first()
+    if not post:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"message": f"{post_id}의 게시글이 없습니다"},
+        )
+
+    if payload.parent_id:
+        parent = (
+            db.query(CommunityComment)
+            .filter(
+                CommunityComment.id == payload.parent_id,
+                CommunityComment.post_id == post_id,
+            )
+            .first()
+        )
+        if not parent:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"message": "유효하지 않은 부모 댓글입니다"},
+            )
+
+    now = datetime.utcnow()
+    comment = CommunityComment(
+        post_id=post_id,
+        user_id=context["user"].id,
+        parent_id=payload.parent_id,
+        content=payload.content,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(comment)
+    post.comment_count += 1
+    db.commit()
+    db.refresh(comment)
+    return serialize_community_comment(comment)
+
+
+@app.delete("/community/comments/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_community_comment(
+    comment_id: int,
+    context=Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
+    comment = (
+        db.query(CommunityComment).filter(CommunityComment.id == comment_id).first()
+    )
+    if not comment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"message": "댓글이 없습니다"},
+        )
+    if comment.user_id != context["user"].id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+
+    post = db.query(CommunityPost).filter(CommunityPost.id == comment.post_id).first()
+    db.delete(comment)
+    if post and post.comment_count > 0:
+        post.comment_count -= 1
+    db.commit()
+    return None
+
+
+@app.post("/community/posts/{post_id}/like")
+def toggle_community_like(
+    post_id: int,
+    context=Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
+    post = db.query(CommunityPost).filter(CommunityPost.id == post_id).first()
+    if not post:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"message": f"{post_id}의 게시글이 없습니다"},
+        )
+    existing = (
+        db.query(CommunityPostLike)
+        .filter(
+            CommunityPostLike.post_id == post_id,
+            CommunityPostLike.user_id == context["user"].id,
+        )
+        .first()
+    )
+    if existing:
+        db.delete(existing)
+        if post.like_count > 0:
+            post.like_count -= 1
+        is_liked = False
+    else:
+        db.add(
+            CommunityPostLike(
+                post_id=post_id,
+                user_id=context["user"].id,
+                created_at=datetime.utcnow(),
+            )
+        )
+        post.like_count += 1
+        is_liked = True
+    db.commit()
+    return {"post_id": post_id, "is_liked": is_liked, "like_count": post.like_count}
+
+
+@app.post("/community/posts/{post_id}/bookmark")
+def toggle_community_bookmark(
+    post_id: int,
+    context=Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
+    post = db.query(CommunityPost).filter(CommunityPost.id == post_id).first()
+    if not post:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"message": f"{post_id}의 게시글이 없습니다"},
+        )
+    existing = (
+        db.query(CommunityPostBookmark)
+        .filter(
+            CommunityPostBookmark.post_id == post_id,
+            CommunityPostBookmark.user_id == context["user"].id,
+        )
+        .first()
+    )
+    if existing:
+        db.delete(existing)
+        is_bookmarked = False
+    else:
+        db.add(
+            CommunityPostBookmark(
+                post_id=post_id,
+                user_id=context["user"].id,
+                created_at=datetime.utcnow(),
+            )
+        )
+        is_bookmarked = True
+    db.commit()
+    return {"post_id": post_id, "is_bookmarked": is_bookmarked}
