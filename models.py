@@ -3,14 +3,20 @@ from pydantic import BaseModel, EmailStr, constr
 
 
 class LoginRequest(BaseModel):
-    userid: constr(min_length=4, pattern=r"^[a-zA-Z0-9]+$")
+    email: EmailStr
     password: constr(min_length=4)
 
 
-class SignupRequest(LoginRequest):
-    name: constr(min_length=1)
+from pydantic import BaseModel, EmailStr
+
+class SignupRequest(BaseModel):
     email: EmailStr
-    url: Optional[str] = None
+    password: str
+    name: str
+    agree_terms: bool = False
+    agree_privacy: bool = False
+    agree_marketing: bool = False
+
 
 
 class PostCreateRequest(BaseModel):

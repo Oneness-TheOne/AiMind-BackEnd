@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import hashlib
 import jwt
 from fastapi import Depends, Header, HTTPException, status
 from passlib.hash import bcrypt
@@ -20,12 +21,19 @@ def create_jwt_token(user_id: str) -> str:
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 
+def _normalize_password(password: str) -> bytes:
+    # bcrypt only uses first 72 bytes; pre-hash to keep long passwords safe.
+    return hashlib.sha256(password.encode("utf-8")).digest()
+
+
 def hash_password(password: str) -> str:
-    return bcrypt.using(rounds=settings.bcrypt_salt_rounds).hash(password)
+    return bcrypt.using(rounds=settings.bcrypt_salt_rounds).hash(
+        _normalize_password(password)
+    )
 
 
 def verify_password(password: str, hashed: str) -> bool:
-    return bcrypt.verify(password, hashed)
+    return bcrypt.verify(_normalize_password(password), hashed)
 
 
 def get_current_user_context(

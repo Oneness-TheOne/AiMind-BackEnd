@@ -10,7 +10,7 @@ def serialize_post(post):
         "userIdx": post.userIdx,
         "name": post.name,
         "userid": post.userid,
-        "url": post.url,
+        "email": post.userid,
         "createdAt": _format_dt(post.createdAt),
         "updatedAt": _format_dt(post.updatedAt),
     }
