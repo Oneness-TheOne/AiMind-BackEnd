@@ -26,6 +26,12 @@ def _format_dt(value):
     return value
 
 
+def _resolve_profile_image_url(value):
+    if not value or value == "base":
+        return "/static/profile-default.svg"
+    return value
+
+
 def serialize_community_post(post, current_user_id=None):
     if post is None:
         return None
@@ -57,6 +63,9 @@ def serialize_community_post(post, current_user_id=None):
             "id": post.user.id if post.user else None,
             "name": post.user.name if post.user else None,
             "badge": "전문가" if post.user and post.user.expert_profile else None,
+            "profile_image_url": _resolve_profile_image_url(
+                post.user.profile_image_url if post.user else None
+            ),
         },
     }
 
@@ -80,5 +89,8 @@ def serialize_community_comment(comment):
             "id": comment.user.id if comment.user else None,
             "name": comment.user.name if comment.user else None,
             "badge": "전문가" if comment.user and comment.user.expert_profile else None,
+            "profile_image_url": _resolve_profile_image_url(
+                comment.user.profile_image_url if comment.user else None
+            ),
         },
     }
