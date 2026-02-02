@@ -74,6 +74,8 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
         password=hashed,
         name=payload.name,
         email=payload.email,
+        profile_image_url="base",
+        region=payload.region,
         agree_terms=1 if payload.agree_terms else 0,
         agree_privacy=1 if payload.agree_privacy else 0,
         agree_marketing=1 if payload.agree_marketing else 0,
@@ -109,7 +111,13 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
 @app.post("/auth/me")
 def me(context=Depends(get_current_user_context)):
     user = context["user"]
-    return {"token": context["token"], "email": user.email}
+    return {
+        "token": context["token"],
+        "email": user.email,
+        "name": user.name,
+        "profile_image_url": user.profile_image_url,
+        "region": user.region,
+    }
 
 
 @app.get("/post")
