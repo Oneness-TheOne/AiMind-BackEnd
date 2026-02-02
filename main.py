@@ -1,7 +1,10 @@
 
 from datetime import datetime
-from fastapi import Depends, FastAPI, HTTPException, status
+from pathlib import Path
+
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -42,8 +45,12 @@ from utils import (
     serialize_post,
     serialize_posts,
 )
+from s3_storage import upload_profile_image_to_s3
 
 app = FastAPI()
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 app.add_middleware(
     CORSMiddleware,
@@ -113,11 +120,33 @@ def me(context=Depends(get_current_user_context)):
     user = context["user"]
     return {
         "token": context["token"],
+        "id": user.id,
         "email": user.email,
         "name": user.name,
-        "profile_image_url": user.profile_image_url,
+        "profile_image_url": _resolve_profile_image_url(user.profile_image_url),
+        # "profile_image_url": user.profile_image_url,
         "region": user.region,
     }
+
+
+@app.put("/users/me/profile-image")
+async def update_profile_image(
+    image: UploadFile = File(...),
+    context=Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
+    user = context["user"]
+    image_url = await upload_profile_image_to_s3(image, user.id)
+    user.profile_image_url = image_url
+    db.commit()
+    db.refresh(user)
+    return {"profile_image_url": _resolve_profile_image_url(user.profile_image_url)}
+
+
+def _resolve_profile_image_url(value: str | None) -> str | None:
+    if not value or value == "base":
+        return "/static/profile-default.svg"
+    return value
 
 
 @app.get("/post")

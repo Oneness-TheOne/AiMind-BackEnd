@@ -23,6 +23,12 @@ class Settings:
     db_password = required("DB_PASSWORD")
     # Optional: path to CA bundle for TLS connections
     db_ssl_ca = os.getenv("DB_SSL_CA")
+    s3_bucket = required("S3_BUCKET")
+    s3_region = required("S3_REGION")
+    s3_access_key_id = required("S3_ACCESS_KEY_ID")
+    s3_secret_access_key = required("S3_SECRET_ACCESS_KEY")
+    # Optional: CDN or custom public base URL for objects
+    s3_public_base_url = os.getenv("S3_PUBLIC_BASE_URL")
 
 
 settings = Settings()
