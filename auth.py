@@ -3,6 +3,7 @@ import hashlib
 import jwt
 from fastapi import Depends, Header, HTTPException, status
 from passlib.hash import bcrypt
+import bcrypt
 from sqlalchemy.orm import Session
 
 from config import settings
@@ -27,13 +28,21 @@ def _normalize_password(password: str) -> bytes:
 
 
 def hash_password(password: str) -> str:
-    return bcrypt.using(rounds=settings.bcrypt_salt_rounds).hash(
-        _normalize_password(password)
-    )
+    pwd_bytes = password.encode('utf-8')
+    truncated_pwd = pwd_bytes[:72]
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(truncated_pwd, salt)
+    return hashed.decode('utf-8')
 
 
 def verify_password(password: str, hashed: str) -> bool:
-    return bcrypt.verify(_normalize_password(password), hashed)
+    normalized = _normalize_password(password)
+    if isinstance(normalized, str):
+        pwd_bytes = normalized.encode('utf-8')
+    else:
+        pwd_bytes = normalized
+    truncated_pwd = pwd_bytes[:72]
+    return bcrypt.checkpw(truncated_pwd, hashed.encode('utf-8'))
 
 
 def get_current_user_context(

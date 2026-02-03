@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import relationship
 
 from db import Base
@@ -16,8 +16,8 @@ class User(Base):
     agree_terms = Column(Integer, nullable=False, default=0)
     agree_privacy = Column(Integer, nullable=False, default=0)
     agree_marketing = Column(Integer, nullable=False, default=0)
-    created_at = Column(DateTime, nullable=False)
-    updated_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=func.now())
+    updated_at = Column(DateTime, nullable=False, default=func.now(), onupdate=func.now())
 
     posts = relationship("Post", back_populates="user")
     community_posts = relationship("CommunityPost", back_populates="user")
