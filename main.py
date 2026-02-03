@@ -1,8 +1,13 @@
 
 from datetime import datetime
 from pathlib import Path
+import os
 
+from dotenv import load_dotenv
+
+import httpx
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
@@ -38,6 +43,21 @@ from models import (
     PostUpdateRequest,
     SignupRequest,
 )
+
+
+current_dir = Path(__file__).resolve().parent
+load_dotenv(current_dir / ".env")
+
+AIMODELS_BASE_URL = os.getenv("AIMODELS_BASE_URL", "http://localhost:6000")
+
+
+class ChatbotRequest(BaseModel):
+    question: str
+
+
+class ChatbotResponse(BaseModel):
+    question: str
+    answer: str
 from utils import (
     serialize_community_comment,
     serialize_community_post,
@@ -65,6 +85,51 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup():
     init_db()
+
+
+@app.post("/chatbot", response_model=ChatbotResponse)
+async def chatbot_proxy(payload: ChatbotRequest):
+    question = payload.question.strip()
+    if not question:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"message": "질문을 입력해 주세요."})
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{AIMODELS_BASE_URL}/chatbot",
+                json={"question": question},
+            )
+        response.raise_for_status()
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"message": "챗봇 서버에 연결할 수 없습니다.", "error": str(exc)},
+        )
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "message": f"챗봇 서버 오류: {exc.response.status_code}",
+                "body": exc.response.text,
+            },
+        )
+
+    try:
+        data = response.json()
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"message": "챗봇 응답이 JSON이 아닙니다.", "body": response.text},
+        )
+
+    answer = data.get("answer")
+    if not answer:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"message": "챗봇 응답이 올바르지 않습니다.", "body": data},
+        )
+
+    return ChatbotResponse(question=question, answer=answer)
 
 
 @app.post("/auth/signup", status_code=status.HTTP_201_CREATED)
