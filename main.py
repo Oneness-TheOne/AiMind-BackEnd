@@ -126,6 +126,7 @@ def me(context=Depends(get_current_user_context)):
         "profile_image_url": _resolve_profile_image_url(user.profile_image_url),
         # "profile_image_url": user.profile_image_url,
         "region": user.region,
+        "created_at": user.created_at,
     }
 
 
@@ -334,7 +335,17 @@ def get_community_posts(
             (CommunityPost.title.like(keyword)) | (CommunityPost.content.like(keyword))
         )
 
-    if sort == "popular":
+    if sort in {"view_count", "views"}:
+        query = query.order_by(
+            CommunityPost.view_count.desc(),
+            CommunityPost.created_at.desc(),
+        )
+    elif sort in {"like_count", "likes"}:
+        query = query.order_by(
+            CommunityPost.like_count.desc(),
+            CommunityPost.created_at.desc(),
+        )
+    elif sort == "popular":
         query = query.order_by(
             CommunityPost.like_count.desc(),
             CommunityPost.view_count.desc(),

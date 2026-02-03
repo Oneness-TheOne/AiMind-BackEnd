@@ -16,6 +16,8 @@ class User(Base):
     agree_terms = Column(Integer, nullable=False, default=0)
     agree_privacy = Column(Integer, nullable=False, default=0)
     agree_marketing = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
 
     posts = relationship("Post", back_populates="user")
     community_posts = relationship("CommunityPost", back_populates="user")
