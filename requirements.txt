@@ -9,7 +9,8 @@ asyncio==4.0.0
 attrs==25.4.0
 bcrypt==3.2.2
 beautifulsoup4==4.14.3
-boto3
+boto3==1.42.39
+botocore==1.42.39
 brotli==1.2.0
 bs4==0.0.2
 certifi==2025.11.12
@@ -49,6 +50,7 @@ ipython_pygments_lexers==1.1.1
 jedi==0.19.2
 Jinja2==3.1.6
 jiter==0.12.0
+jmespath==1.1.0
 joblib==1.5.3
 jupyter_client==8.6.3
 jupyter_core==5.9.1
@@ -112,6 +114,7 @@ requests==2.32.5
 rich==14.2.0
 ruamel.yaml==0.18.17
 ruamel.yaml.clib==0.2.15
+s3transfer==0.16.0
 safehttpx==0.1.7
 safetensors==0.7.0
 scikit-learn==1.8.0
