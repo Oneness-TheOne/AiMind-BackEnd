@@ -23,26 +23,29 @@ def create_jwt_token(user_id: str) -> str:
 
 
 def _normalize_password(password: str) -> bytes:
-    # bcrypt only uses first 72 bytes; pre-hash to keep long passwords safe.
+    # bcrypt의 72바이트 제한을 피하기 위해 SHA-256으로 전처리 (결과는 항상 32바이트)
     return hashlib.sha256(password.encode("utf-8")).digest()
 
 
 def hash_password(password: str) -> str:
-    pwd_bytes = password.encode('utf-8')
-    truncated_pwd = pwd_bytes[:72]
+    # 1. SHA-256 바이트 데이터를 가져옴
+    normalized = _normalize_password(password)
+    
+    # 2. bcrypt는 바이트 데이터를 바로 받을 수 있음
     salt = bcrypt.gensalt()
-    hashed = bcrypt.hashpw(truncated_pwd, salt)
+    hashed = bcrypt.hashpw(normalized, salt)
+    
+    # 3. DB 저장을 위해 문자열로 변환
     return hashed.decode('utf-8')
 
 
 def verify_password(password: str, hashed: str) -> bool:
+    # 1. 로그인 시 입력받은 비번도 똑같이 SHA-256 바이트로 변환
     normalized = _normalize_password(password)
-    if isinstance(normalized, str):
-        pwd_bytes = normalized.encode('utf-8')
-    else:
-        pwd_bytes = normalized
-    truncated_pwd = pwd_bytes[:72]
-    return bcrypt.checkpw(truncated_pwd, hashed.encode('utf-8'))
+    
+    # 2. DB에 저장된 hashed 문자열을 바이트로 변환해서 비교
+    # bcrypt.checkpw(입력받은_바이트, DB에_있던_바이트)
+    return bcrypt.checkpw(normalized, hashed.encode('utf-8'))
 
 
 def get_current_user_context(
