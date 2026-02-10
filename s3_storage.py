@@ -44,6 +44,11 @@ def _build_analysis_image_key(user_id: int, object_type: str, content_type: str 
     return f"users/{user_id}/analyses/{uuid4().hex}_{object_type}{ext}"
 
 
+def _build_diary_ocr_image_key(user_id: int, content_type: str = "image/jpeg") -> str:
+    ext = ALLOWED_IMAGE_TYPES.get(content_type, ".jpg")
+    return f"users/{user_id}/diary-ocr/{uuid4().hex}{ext}"
+
+
 def _get_s3_client():
     return boto3.client(
         "s3",
@@ -163,4 +168,54 @@ async def upload_analysis_box_image_to_s3(
         )
     except (BotoCoreError, ClientError):
         return None
+    return _build_public_url(key)
+
+
+async def upload_diary_ocr_image_to_s3(
+    contents: bytes,
+    user_id: int,
+    filename: str | None = None,
+    content_type: str | None = None,
+) -> str:
+    """
+    그림일기(원본 이미지)를 S3에 업로드 후 public URL 반환.
+    UploadFile을 직접 받지 않는 이유: 읽기(consume) 문제를 피하기 위해 bytes로 받습니다.
+    """
+    if not contents:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": "빈 파일입니다"},
+        )
+
+    ct = content_type or "image/jpeg"
+    if ct not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail={"message": "JPEG/PNG/WEBP 이미지만 업로드 가능합니다"},
+        )
+
+    data = contents
+    if len(data) > MAX_IMAGE_BYTES:
+        data = _reencode_image(data, ct)
+        if len(data) > MAX_IMAGE_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail={"message": "이미지는 5MB 이하만 가능합니다"},
+            )
+
+    key = _build_diary_ocr_image_key(user_id, ct)
+    s3 = _get_s3_client()
+    try:
+        s3.put_object(
+            Bucket=settings.s3_bucket,
+            Key=key,
+            Body=data,
+            ContentType=ct,
+        )
+    except (BotoCoreError, ClientError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"message": "S3 업로드에 실패했습니다", "error": str(exc)},
+        )
+
     return _build_public_url(key)

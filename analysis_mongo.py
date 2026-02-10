@@ -79,6 +79,29 @@ class AnalysisLog(Document):
         name = "analysis_logs"
 
 
+class DiaryOcrEntry(Document):
+    """
+    그림일기 OCR 결과 1건.
+    - 이미지: S3 URL로 저장
+    - 텍스트: 날짜/제목/내용 + 원본 텍스트 저장
+    """
+    user_id: Indexed(int) = Field(..., description="MySQL User ID")
+    region: str = Field(default="", description="지역(사용자 선택)")
+    image_url: str = Field(default="", description="원본 그림일기 이미지 S3 URL")
+    date: str = Field(default="", description="추출된 날짜(YYYY-MM-DD)")
+    title: str = Field(default="", description="추출된 제목")
+    original_text: str = Field(default="", description="OCR 후처리 원본 텍스트")
+    corrected_text: str = Field(default="", description="교정된 내용")
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="생성 시각",
+    )
+
+    class Settings:
+        # 사용자가 말한 'diary-ocr 폴더'를 컬렉션으로 해석
+        name = "diary_ocr"
+
+
 # --- API 요청/응답 스키마 ---
 
 

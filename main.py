@@ -6,7 +6,7 @@ import os
 from dotenv import load_dotenv
 
 import httpx
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -22,7 +22,13 @@ from auth import (
 )
 from db import get_db, init_db
 from mongo import close_mongo, init_mongo
-from analysis_mongo import AnalysisLog, AnalysisSaveRequest, DrawingAnalysis, DrawingAnalysisSaveRequest
+from analysis_mongo import (
+    AnalysisLog,
+    AnalysisSaveRequest,
+    DrawingAnalysis,
+    DrawingAnalysisSaveRequest,
+    DiaryOcrEntry,
+)
 from db_models import (
     Child,
     CommunityCategory,
@@ -52,7 +58,7 @@ from models import (
 current_dir = Path(__file__).resolve().parent
 load_dotenv(current_dir / ".env")
 
-AIMODELS_BASE_URL = os.getenv("AIMODELS_BASE_URL", "http://localhost:6000")
+AIMODELS_BASE_URL = os.getenv("AIMODELS_BASE_URL", "http://localhost:8080")
 
 
 class ChatbotRequest(BaseModel):
@@ -70,7 +76,11 @@ from utils import (
     serialize_post,
     serialize_posts,
 )
-from s3_storage import upload_profile_image_to_s3, upload_analysis_box_image_to_s3
+from s3_storage import (
+    upload_profile_image_to_s3,
+    upload_analysis_box_image_to_s3,
+    upload_diary_ocr_image_to_s3,
+)
 
 app = FastAPI()
 
@@ -199,16 +209,19 @@ async def get_analysis_logs(user_id: int):
 
 @app.post("/drawing-analyses", status_code=status.HTTP_201_CREATED)
 async def create_drawing_analysis(payload: DrawingAnalysisSaveRequest):
-    """그림 분석 1건 저장. 박스 이미지를 S3에 업로드 후 URL과 함께 MongoDB에 저장."""
+    """그림 분석 1건 저장. element_analysis(image_json+features)를 MongoDB에 저장. S3 업로드는 실패해도 DB 저장 진행."""
     analyzed_urls = {}
     for key in ("tree", "house", "man", "woman"):
         b64 = payload.box_images_base64.get(key)
         if b64:
-            url = await upload_analysis_box_image_to_s3(
-                b64, payload.user_id, key
-            )
-            if url:
-                analyzed_urls[key] = url
+            try:
+                url = await upload_analysis_box_image_to_s3(
+                    b64, payload.user_id, key
+                )
+                if url:
+                    analyzed_urls[key] = url
+            except Exception:
+                pass  # S3 실패해도 element_analysis는 DB에 저장
     doc = DrawingAnalysis(
         user_id=payload.user_id,
         child_info=payload.child_info,
@@ -253,12 +266,54 @@ async def list_drawing_analyses(
     ]
 
 
+def _normalize_gender_for_score(value: str | None) -> str:
+    v = (value or "").strip().lower()
+    if v in {"male", "m", "남", "남아"}:
+        return "남"
+    if v in {"female", "f", "여", "여아"}:
+        return "여"
+    return ""
+
+
+async def _call_aimodels_analyze_score(
+    element_analysis: dict,
+    child_info: dict,
+) -> dict | None:
+    """DB의 element_analysis로 AiModels /analyze/score 호출 → T-Score 반환."""
+    results = {
+        k: {"image_json": v}
+        for k, v in (element_analysis or {}).items()
+        if v and isinstance(v, dict) and (k in {"tree", "house", "man", "woman"})
+    }
+    if not results:
+        return None
+    try:
+        age_raw = child_info.get("age") or child_info.get("나이") or "0"
+        age = int(age_raw) if str(age_raw).isdigit() else 0
+        age = max(7, min(13, age)) if age else 8
+        gender = _normalize_gender_for_score(
+            child_info.get("gender") or child_info.get("성별") or ""
+        )
+        if not gender:
+            return None
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{AIMODELS_BASE_URL}/analyze/score",
+                json={"results": results, "age": age, "gender": gender},
+            )
+        if resp.status_code != 200:
+            return None
+        return resp.json()
+    except Exception:
+        return None
+
+
 @app.get("/drawing-analyses/{analysis_id}")
 async def get_drawing_analysis(
     analysis_id: str,
     context=Depends(get_current_user_context),
 ):
-    """그림 분석 1건 상세 조회. 인증된 유저만 본인 것 조회."""
+    """그림 분석 1건 상세 조회. DB의 element_analysis로 T-Score 재계산 후 comparison에 반영."""
     from beanie import PydanticObjectId
     try:
         oid = PydanticObjectId(analysis_id)
@@ -269,6 +324,16 @@ async def get_drawing_analysis(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     if doc.user_id != context["user"].id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+
+    comparison = dict(doc.comparison or {})
+
+    drawing_scores = await _call_aimodels_analyze_score(
+        doc.element_analysis or {},
+        doc.child_info or {},
+    )
+    if drawing_scores:
+        comparison["drawing_scores"] = drawing_scores
+
     return {
         "id": str(doc.id),
         "user_id": doc.user_id,
@@ -277,7 +342,169 @@ async def get_drawing_analysis(
         "element_analysis": doc.element_analysis,
         "analyzed_image_urls": doc.analyzed_image_urls,
         "psychological_interpretation": doc.psychological_interpretation,
-        "comparison": doc.comparison,
+        "comparison": comparison,
+    }
+
+
+# --- 그림일기 OCR 저장 (diary_ocr: S3 이미지 + Mongo 텍스트) ---
+
+
+async def _call_aimodels_diary_ocr(
+    *,
+    contents: bytes,
+    filename: str,
+    content_type: str,
+    area: str,
+) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            response = await client.post(
+                f"{AIMODELS_BASE_URL}/diary-ocr",
+                data={"area": area},
+                files={"file": (filename, contents, content_type)},
+            )
+        response.raise_for_status()
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"message": "AI Models 서버에 연결할 수 없습니다.", "error": str(exc)},
+        )
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"message": "AI Models 서버 오류", "status_code": exc.response.status_code, "body": exc.response.text},
+        )
+
+    try:
+        data = response.json()
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"message": "AI Models 응답이 JSON이 아닙니다.", "body": response.text},
+        )
+
+    raw = data[0] if isinstance(data, list) and data else data
+    if not isinstance(raw, dict):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"message": "AI Models 응답 형식이 올바르지 않습니다.", "body": data},
+        )
+    return raw
+
+
+@app.post("/diary-ocr", status_code=status.HTTP_201_CREATED)
+async def create_diary_ocr_entry(
+    file: UploadFile = File(...),
+    area: str = Form(""),
+    context=Depends(get_current_user_context),
+):
+    """그림일기 업로드 → OCR(별도 AI Models) → 원본 이미지는 S3 → 텍스트 JSON은 MongoDB(diary_ocr) 저장."""
+    user = context["user"]
+    if not file or not file.filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"message": "파일을 업로드해 주세요."})
+
+    contents = await file.read()
+    content_type = file.content_type or "image/jpeg"
+    if not area:
+        area = user.region or ""
+
+    # 1) S3 업로드(원본 이미지)
+    image_url = await upload_diary_ocr_image_to_s3(
+        contents,
+        user_id=user.id,
+        filename=file.filename,
+        content_type=content_type,
+    )
+
+    # 2) OCR/추출 (AI Models)
+    extracted = await _call_aimodels_diary_ocr(
+        contents=contents,
+        filename=file.filename,
+        content_type=content_type,
+        area=area or "도봉구",
+    )
+
+    # 3) Mongo 저장
+    doc = DiaryOcrEntry(
+        user_id=user.id,
+        region=area or "",
+        image_url=image_url,
+        date=extracted.get("날짜", "") or "",
+        title=extracted.get("제목", "") or "",
+        original_text=extracted.get("원본", "") or "",
+        corrected_text=extracted.get("교정된_내용", "") or "",
+    )
+    await doc.insert()
+
+    return {
+        "id": str(doc.id),
+        "user_id": doc.user_id,
+        "created_at": doc.created_at.isoformat(),
+        "region": doc.region,
+        "image_url": doc.image_url,
+        "date": doc.date,
+        "title": doc.title,
+        "original_text": doc.original_text,
+        "corrected_text": doc.corrected_text,
+    }
+
+
+@app.get("/diary-ocr")
+async def list_diary_ocr_entries(
+    user_id: int,
+    context=Depends(get_current_user_context),
+):
+    """내 그림일기 OCR 목록(최신순)."""
+    if context["user"].id != user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+    docs = (
+        await DiaryOcrEntry.find(DiaryOcrEntry.user_id == user_id)
+        .sort([("created_at", -1)])
+        .to_list()
+    )
+    return [
+        {
+            "id": str(d.id),
+            "user_id": d.user_id,
+            "created_at": d.created_at.isoformat(),
+            "region": d.region,
+            "image_url": d.image_url,
+            "date": d.date,
+            "title": d.title,
+            "original_text": d.original_text,
+            "corrected_text": d.corrected_text,
+        }
+        for d in docs
+    ]
+
+
+@app.get("/diary-ocr/{entry_id}")
+async def get_diary_ocr_entry(
+    entry_id: str,
+    context=Depends(get_current_user_context),
+):
+    """그림일기 OCR 1건 상세."""
+    from beanie import PydanticObjectId
+
+    try:
+        oid = PydanticObjectId(entry_id)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    doc = await DiaryOcrEntry.get(oid)
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    if doc.user_id != context["user"].id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+    return {
+        "id": str(doc.id),
+        "user_id": doc.user_id,
+        "created_at": doc.created_at.isoformat(),
+        "region": doc.region,
+        "image_url": doc.image_url,
+        "date": doc.date,
+        "title": doc.title,
+        "original_text": doc.original_text,
+        "corrected_text": doc.corrected_text,
     }
 
 
