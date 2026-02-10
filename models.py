@@ -1,5 +1,5 @@
-from typing import Optional, List
-from pydantic import BaseModel, EmailStr, constr
+from typing import List, Literal, Optional
+from pydantic import BaseModel, EmailStr, Field, constr
 
 
 class LoginRequest(BaseModel):
@@ -47,3 +47,9 @@ class CommunityPostUpdateRequest(BaseModel):
 class CommunityCommentCreateRequest(BaseModel):
     content: constr(min_length=1)
     parent_id: Optional[int] = None
+
+
+class ChildCreateRequest(BaseModel):
+    name: constr(min_length=1, max_length=100)
+    age: int = Field(ge=7, le=13, description="7~13세, 그림 분석 지원 나이")
+    gender: Literal["male", "female"]

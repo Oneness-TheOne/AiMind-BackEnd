@@ -21,7 +21,10 @@ from auth import (
     verify_password,
 )
 from db import get_db, init_db
+from mongo import close_mongo, init_mongo
+from analysis_mongo import AnalysisLog, AnalysisSaveRequest
 from db_models import (
+    Child,
     CommunityCategory,
     CommunityComment,
     CommunityPost,
@@ -35,6 +38,7 @@ from db_models import (
     User,
 )
 from models import (
+    ChildCreateRequest,
     CommunityCommentCreateRequest,
     CommunityPostCreateRequest,
     CommunityPostUpdateRequest,
@@ -87,6 +91,16 @@ def on_startup():
     init_db()
 
 
+@app.on_event("startup")
+async def on_startup_mongo():
+    await init_mongo()
+
+
+@app.on_event("shutdown")
+async def on_shutdown_mongo():
+    await close_mongo()
+
+
 @app.post("/chatbot", response_model=ChatbotResponse)
 async def chatbot_proxy(payload: ChatbotRequest):
     question = payload.question.strip()
@@ -130,6 +144,49 @@ async def chatbot_proxy(payload: ChatbotRequest):
         )
 
     return ChatbotResponse(question=question, answer=answer)
+
+
+# --- AI 분석 로그 (MongoDB) ---
+
+
+@app.post("/analysis/save", status_code=status.HTTP_201_CREATED)
+async def analysis_save(payload: AnalysisSaveRequest):
+    """AI 그림 해석 결과 JSON을 MongoDB analysis_logs에 저장 (image_to_json, jsonToLlm, ocr 모듈 결과)."""
+    log = AnalysisLog(
+        user_id=payload.user_id,
+        image_to_json=payload.image_to_json,
+        json_to_llm_json=payload.json_to_llm_json,
+        llm_result_text=payload.llm_result_text,
+        ocr_json=payload.ocr_json,
+    )
+    await log.insert()
+    return {
+        "id": str(log.id),
+        "user_id": log.user_id,
+        "created_at": log.created_at.isoformat(),
+    }
+
+
+@app.get("/analysis/{user_id}")
+async def get_analysis_logs(user_id: int):
+    """특정 유저의 분석 기록 목록 (최신순)."""
+    logs = (
+        await AnalysisLog.find(AnalysisLog.user_id == user_id)
+        .sort([("created_at", -1)])
+        .to_list()
+    )
+    return [
+        {
+            "id": str(doc.id),
+            "user_id": doc.user_id,
+            "created_at": doc.created_at.isoformat(),
+            "image_to_json": doc.image_to_json,
+            "json_to_llm_json": doc.json_to_llm_json,
+            "llm_result_text": doc.llm_result_text,
+            "ocr_json": doc.ocr_json,
+        }
+        for doc in logs
+    ]
 
 
 @app.post("/auth/signup", status_code=status.HTTP_201_CREATED)
@@ -192,6 +249,58 @@ def me(context=Depends(get_current_user_context)):
         # "profile_image_url": user.profile_image_url,
         "region": user.region,
         "created_at": user.created_at,
+    }
+
+
+# --- 아이(children) API ---
+
+
+@app.get("/children")
+def get_my_children(
+    context=Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
+    """내가 등록한 아이 목록"""
+    children = (
+        db.query(Child)
+        .filter(Child.user_id == context["user"].id)
+        .order_by(Child.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": c.id,
+            "name": c.name,
+            "age": c.age,
+            "gender": c.gender,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+        }
+        for c in children
+    ]
+
+
+@app.post("/children", status_code=status.HTTP_201_CREATED)
+def create_child(
+    payload: ChildCreateRequest,
+    context=Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
+    """아이 등록"""
+    child = Child(
+        user_id=context["user"].id,
+        name=payload.name,
+        age=payload.age,
+        gender=payload.gender,
+    )
+    db.add(child)
+    db.commit()
+    db.refresh(child)
+    return {
+        "id": child.id,
+        "name": child.name,
+        "age": child.age,
+        "gender": child.gender,
+        "created_at": child.created_at.isoformat() if child.created_at else None,
     }
 
 

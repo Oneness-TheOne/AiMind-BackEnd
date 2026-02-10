@@ -30,5 +30,12 @@ class Settings:
     # Optional: CDN or custom public base URL for objects
     s3_public_base_url = os.getenv("S3_PUBLIC_BASE_URL")
 
+    # MongoDB (AI 분석 로그 등)
+    mongodb_uri = os.getenv(
+        "MONGODB_URI",
+        "mongodb+srv://wob0217_db_user:D2THWGAN9HXh9vL7@aimind.ixkqnnp.mongodb.net/?appName=AiMind",
+    )
+    mongodb_db_name = os.getenv("MONGODB_DB_NAME", "aimind")
+
 
 settings = Settings()
