@@ -1,17 +1,59 @@
 """
 AI 그림 해석 프로세스 결과 저장용 MongoDB 스키마 및 API 요청/응답 모델.
-컬렉션: analysis_logs
 
-모듈 매핑:
-- image_to_json: AiMind-AiModels/image_to_json (객체탐지 → 그림 요소 분석)
-- json_to_llm: AiMind-AiModels/jsonToLlm (요소 위치/크기 분석 → LLM)
-- ocr: AiMind-AiModels/ocr
+컬렉션:
+- analysis_logs: 레거시 (호환 유지)
+- drawing_analyses: 그림 분석 1건 전체 (요소분석, S3 이미지 URL, 심리해석)
 """
 from datetime import datetime, timezone
 from typing import Any
 
 from beanie import Document, Indexed
 from pydantic import BaseModel, Field
+
+
+class DrawingAnalysis(Document):
+    """
+    그림 분석 1건. 요소분석 결과, S3 분석이미지 URL, 심리해석 JSON 저장.
+    """
+    user_id: Indexed(int) = Field(..., description="MySQL User ID")
+    child_info: dict[str, Any] = Field(
+        default_factory=dict,
+        description="아이 정보 { name, age, gender }",
+    )
+    element_analysis: dict[str, Any] = Field(
+        default_factory=dict,
+        description="요소 분석 결과 { tree, house, man, woman } → image_json",
+    )
+    analyzed_image_urls: dict[str, str] = Field(
+        default_factory=dict,
+        description="분석 이미지 S3 URL { tree, house, man, woman }",
+    )
+    psychological_interpretation: dict[str, Any] = Field(
+        default_factory=dict,
+        description="심리해석 JSON { tree, house, man, woman } → { interpretation, analysis }",
+    )
+    comparison: dict[str, Any] = Field(default_factory=dict, description="또래 비교 등")
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="생성 시각",
+    )
+
+    class Settings:
+        name = "drawing_analyses"
+
+
+class DrawingAnalysisSaveRequest(BaseModel):
+    """POST /drawing-analyses 저장 요청."""
+    user_id: int = Field(..., description="MySQL User ID")
+    child_info: dict[str, Any] = Field(default_factory=dict)
+    element_analysis: dict[str, Any] = Field(default_factory=dict)
+    box_images_base64: dict[str, str | None] = Field(
+        default_factory=dict,
+        description="분석 박스 이미지 base64 { tree, house, man, woman }",
+    )
+    psychological_interpretation: dict[str, Any] = Field(default_factory=dict)
+    comparison: dict[str, Any] = Field(default_factory=dict)
 
 
 class AnalysisLog(Document):

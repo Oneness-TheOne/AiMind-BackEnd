@@ -1,5 +1,7 @@
+import base64
 import io
 import os
+import re
 from uuid import uuid4
 
 import boto3
@@ -35,6 +37,11 @@ def _build_object_key(user_id: int, filename: str | None, content_type: str | No
         if guessed and len(guessed) <= 10:
             ext = guessed.lower()
     return f"users/{user_id}/profile/{uuid4().hex}{ext}"
+
+
+def _build_analysis_image_key(user_id: int, object_type: str, content_type: str = "image/jpeg") -> str:
+    ext = ALLOWED_IMAGE_TYPES.get(content_type, ".jpg")
+    return f"users/{user_id}/analyses/{uuid4().hex}_{object_type}{ext}"
 
 
 def _get_s3_client():
@@ -115,4 +122,45 @@ async def upload_profile_image_to_s3(upload: UploadFile, user_id: int) -> str:
             detail={"message": "S3 업로드에 실패했습니다", "error": str(exc)},
         )
 
+    return _build_public_url(key)
+
+
+def _decode_base64_image(data_url: str) -> tuple[bytes, str]:
+    """data:image/jpeg;base64,... 형태에서 (bytes, content_type) 반환."""
+    m = re.match(r"data:image/(\w+);base64,(.+)", data_url or "")
+    if not m:
+        raise ValueError("유효한 base64 이미지 형식이 아닙니다")
+    subtype = m.group(1).lower()
+    content_type = f"image/{subtype}" if subtype in {"jpeg", "jpg", "png", "webp", "gif"} else "image/jpeg"
+    raw = base64.b64decode(m.group(2))
+    if not raw:
+        raise ValueError("base64 디코드 실패")
+    return raw, content_type
+
+
+async def upload_analysis_box_image_to_s3(
+    base64_data_url: str | None,
+    user_id: int,
+    object_type: str,
+) -> str | None:
+    """분석 박스 이미지(base64 data URL)를 S3에 업로드 후 public URL 반환. None이면 None 반환."""
+    if not base64_data_url or not base64_data_url.strip():
+        return None
+    try:
+        contents, content_type = _decode_base64_image(base64_data_url)
+    except (ValueError, TypeError):
+        return None
+    if content_type not in ALLOWED_IMAGE_TYPES:
+        content_type = "image/jpeg"
+    key = _build_analysis_image_key(user_id, object_type, content_type)
+    s3 = _get_s3_client()
+    try:
+        s3.put_object(
+            Bucket=settings.s3_bucket,
+            Key=key,
+            Body=contents,
+            ContentType=content_type,
+        )
+    except (BotoCoreError, ClientError):
+        return None
     return _build_public_url(key)

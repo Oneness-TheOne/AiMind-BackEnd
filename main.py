@@ -22,7 +22,7 @@ from auth import (
 )
 from db import get_db, init_db
 from mongo import close_mongo, init_mongo
-from analysis_mongo import AnalysisLog, AnalysisSaveRequest
+from analysis_mongo import AnalysisLog, AnalysisSaveRequest, DrawingAnalysis, DrawingAnalysisSaveRequest
 from db_models import (
     Child,
     CommunityCategory,
@@ -57,6 +57,7 @@ AIMODELS_BASE_URL = os.getenv("AIMODELS_BASE_URL", "http://localhost:6000")
 
 class ChatbotRequest(BaseModel):
     question: str
+    analysis_context: dict | None = None
 
 
 class ChatbotResponse(BaseModel):
@@ -69,7 +70,7 @@ from utils import (
     serialize_post,
     serialize_posts,
 )
-from s3_storage import upload_profile_image_to_s3
+from s3_storage import upload_profile_image_to_s3, upload_analysis_box_image_to_s3
 
 app = FastAPI()
 
@@ -107,11 +108,15 @@ async def chatbot_proxy(payload: ChatbotRequest):
     if not question:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"message": "질문을 입력해 주세요."})
 
+    request_body = {"question": question}
+    if payload.analysis_context:
+        request_body["analysis_context"] = payload.analysis_context
+
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 f"{AIMODELS_BASE_URL}/chatbot",
-                json={"question": question},
+                json=request_body,
             )
         response.raise_for_status()
     except httpx.RequestError as exc:
@@ -169,7 +174,7 @@ async def analysis_save(payload: AnalysisSaveRequest):
 
 @app.get("/analysis/{user_id}")
 async def get_analysis_logs(user_id: int):
-    """특정 유저의 분석 기록 목록 (최신순)."""
+    """특정 유저의 분석 기록 목록 (최신순). [레거시] analysis_logs"""
     logs = (
         await AnalysisLog.find(AnalysisLog.user_id == user_id)
         .sort([("created_at", -1)])
@@ -187,6 +192,93 @@ async def get_analysis_logs(user_id: int):
         }
         for doc in logs
     ]
+
+
+# --- 그림 분석 저장 (drawing_analyses: 요소분석 + S3 이미지 + 심리해석) ---
+
+
+@app.post("/drawing-analyses", status_code=status.HTTP_201_CREATED)
+async def create_drawing_analysis(payload: DrawingAnalysisSaveRequest):
+    """그림 분석 1건 저장. 박스 이미지를 S3에 업로드 후 URL과 함께 MongoDB에 저장."""
+    analyzed_urls = {}
+    for key in ("tree", "house", "man", "woman"):
+        b64 = payload.box_images_base64.get(key)
+        if b64:
+            url = await upload_analysis_box_image_to_s3(
+                b64, payload.user_id, key
+            )
+            if url:
+                analyzed_urls[key] = url
+    doc = DrawingAnalysis(
+        user_id=payload.user_id,
+        child_info=payload.child_info,
+        element_analysis=payload.element_analysis,
+        analyzed_image_urls=analyzed_urls,
+        psychological_interpretation=payload.psychological_interpretation,
+        comparison=payload.comparison,
+    )
+    await doc.insert()
+    return {
+        "id": str(doc.id),
+        "user_id": doc.user_id,
+        "created_at": doc.created_at.isoformat(),
+    }
+
+
+@app.get("/drawing-analyses")
+async def list_drawing_analyses(
+    user_id: int,
+    context=Depends(get_current_user_context),
+):
+    """내 그림 분석 목록 (최신순). 인증된 유저만 본인 것 조회."""
+    if context["user"].id != user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+    docs = (
+        await DrawingAnalysis.find(DrawingAnalysis.user_id == user_id)
+        .sort([("created_at", -1)])
+        .to_list()
+    )
+    return [
+        {
+            "id": str(d.id),
+            "user_id": d.user_id,
+            "child_info": d.child_info,
+            "created_at": d.created_at.isoformat(),
+            "element_analysis": d.element_analysis,
+            "analyzed_image_urls": d.analyzed_image_urls,
+            "psychological_interpretation": d.psychological_interpretation,
+            "comparison": d.comparison,
+        }
+        for d in docs
+    ]
+
+
+@app.get("/drawing-analyses/{analysis_id}")
+async def get_drawing_analysis(
+    analysis_id: str,
+    context=Depends(get_current_user_context),
+):
+    """그림 분석 1건 상세 조회. 인증된 유저만 본인 것 조회."""
+    from beanie import PydanticObjectId
+    try:
+        oid = PydanticObjectId(analysis_id)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    doc = await DrawingAnalysis.get(oid)
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    if doc.user_id != context["user"].id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
+    return {
+        "id": str(doc.id),
+        "user_id": doc.user_id,
+        "child_info": doc.child_info,
+        "created_at": doc.created_at.isoformat(),
+        "element_analysis": doc.element_analysis,
+        "analyzed_image_urls": doc.analyzed_image_urls,
+        "psychological_interpretation": doc.psychological_interpretation,
+        "comparison": doc.comparison,
+    }
 
 
 @app.post("/auth/signup", status_code=status.HTTP_201_CREATED)

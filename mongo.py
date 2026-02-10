@@ -14,11 +14,11 @@ mongo_client: AsyncIOMotorClient | None = None
 async def init_mongo():
     """FastAPI startup에서 호출. MongoDB 연결 후 Beanie 문서 모델 초기화."""
     global mongo_client
-    from analysis_mongo import AnalysisLog
+    from analysis_mongo import AnalysisLog, DrawingAnalysis
 
     mongo_client = AsyncIOMotorClient(settings.mongodb_uri)
     database = mongo_client[settings.mongodb_db_name]
-    await init_beanie(database=database, document_models=[AnalysisLog])
+    await init_beanie(database=database, document_models=[AnalysisLog, DrawingAnalysis])
 
 
 async def close_mongo():
