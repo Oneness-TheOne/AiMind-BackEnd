@@ -5,7 +5,7 @@ AI 분석 로그(analysis_logs) 등 복잡한 JSON 저장용.
 from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import init_beanie
 
-from .config import settings
+from config import settings
 
 # 앱 lifespan에서 설정됨
 mongo_client: AsyncIOMotorClient | None = None

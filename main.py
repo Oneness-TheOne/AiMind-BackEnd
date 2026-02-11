@@ -1,4 +1,5 @@
 
+import base64
 from datetime import datetime
 from pathlib import Path
 import os
@@ -25,6 +26,7 @@ from mongo import close_mongo, init_mongo
 from analysis_mongo import (
     AnalysisLog,
     AnalysisSaveRequest,
+    DiaryOcrEntry,
     DrawingAnalysis,
     DrawingAnalysisSaveRequest,
 )
@@ -359,14 +361,23 @@ async def _call_aimodels_diary_ocr(
             )
         response.raise_for_status()
     except httpx.RequestError as exc:
+        print(f"[diary-ocr/extract] AiModels 연결 실패 (URL={AIMODELS_BASE_URL}/diary-ocr): {exc}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"message": "AI Models 서버에 연결할 수 없습니다.", "error": str(exc)},
+            detail={
+                "message": "AI 그림일기 서버에 연결할 수 없습니다. AiModels 서버가 실행 중인지, .env의 AIMODELS_BASE_URL이 맞는지 확인하세요.",
+                "error": str(exc),
+            },
         )
     except httpx.HTTPStatusError as exc:
+        print(f"[diary-ocr/extract] AiModels 응답 오류 status={exc.response.status_code} body={exc.response.text[:500]}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"message": "AI Models 서버 오류", "status_code": exc.response.status_code, "body": exc.response.text},
+            detail={
+                "message": "AI 그림일기 서버 오류. AiModels 터미널 로그를 확인하세요.",
+                "status_code": exc.response.status_code,
+                "body": (exc.response.text or "")[:1000],
+            },
         )
     try:
         data = response.json()
@@ -386,7 +397,8 @@ async def _call_aimodels_diary_ocr(
 
 @app.post("/diary-ocr/extract")
 async def extract_diary_ocr_text(file: UploadFile = File(...)):
-    """그림일기 이미지 → AiModels diary_ocr_pipeline → 추출 결과만 반환 (저장 없음). 텍스트 추출하기 버튼용."""
+    """그림일기 이미지 → AiModels diary_ocr_pipeline → 추출 결과만 반환 (저장 없음). 텍스트 추출하기 버튼용.
+    응답에 추출에 사용한 이미지를 image_data_url 로 포함해 카드 사진란에 쓸 수 있게 함."""
     if not file or not file.filename:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"message": "파일을 업로드해 주세요."})
     contents = await file.read()
@@ -396,7 +408,36 @@ async def extract_diary_ocr_text(file: UploadFile = File(...)):
         filename=file.filename,
         content_type=content_type,
     )
-    return extracted
+    if not isinstance(extracted, dict):
+        extracted = {}
+    out = dict(extracted)
+    # AiModels가 크롭된 이미지(image_data_url)를 보냈으면 그대로 사용, 없으면 업로드 원본을 data URL로 포함
+    if out.get("image_data_url"):
+        pass  # 이미 있음 (크롭 이미지)
+    else:
+        b64 = base64.b64encode(contents).decode("utf-8")
+        ct = (content_type or "image/jpeg").split(";")[0].strip() or "image/jpeg"
+        out["image_data_url"] = f"data:{ct};base64,{b64}"
+    return out
+
+
+@app.get("/diary-ocr")
+async def get_diary_ocr_entries(context=Depends(get_current_user_context)):
+    """저장된 그림일기 OCR 목록 조회. 토큰의 로그인 사용자 기준으로만 조회."""
+    user_id = context["user"].id
+    entries = await DiaryOcrEntry.find(DiaryOcrEntry.user_id == user_id).sort(-DiaryOcrEntry.created_at).to_list()
+    return [
+        {
+            "id": str(doc.id),
+            "image_url": doc.image_url or "",
+            "corrected_text": doc.corrected_text or "",
+            "original_text": doc.original_text or "",
+            "date": doc.date or "",
+            "title": doc.title or "",
+            "created_at": doc.created_at.isoformat() if doc.created_at else "",
+        }
+        for doc in entries
+    ]
 
 
 @app.post("/auth/signup", status_code=status.HTTP_201_CREATED)
