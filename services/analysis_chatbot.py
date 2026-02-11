@@ -6,7 +6,7 @@ from analysis_mongo import DrawingAnalysis
 
 async def get_psychology_interpretation_by_category(
     user_id: int,
-    category: Any
+    category: tuple
 ) -> Optional[dict[str, Any]]:
     """
     특정 사용자의 최신 분석 결과에서 카테고리별 interpretation만 반환
@@ -20,20 +20,18 @@ async def get_psychology_interpretation_by_category(
     if not analysis:
         return None
     
-    target_list = [category] if isinstance(category, str) else category
-
     interp_data = analysis.psychological_interpretation
     interpret_result = {}
 
-    # all이면 interpretation만 모아서 반환
-    if category == "all":
+    # all이면 interpretation 전부 가져오기
+    if "all" in category:
         return {
             key: value.get("interpretation")
             for key, value in interp_data.items()
         }
 
-    # 특정 category
-    for c in target_list:
+    # 특정 category에 대한 interpretation
+    for c in category:
         # interp_data에서 'tree', 'house' 같은 문자열 키로 접근
         category_obj = interp_data.get(c) 
         
@@ -41,5 +39,7 @@ async def get_psychology_interpretation_by_category(
             interpret_result[c] = category_obj.get('interpretation')
         else:
             interpret_result[c] = None
+
+    print(f"interpret_result: {interpret_result}")
 
     return interpret_result
