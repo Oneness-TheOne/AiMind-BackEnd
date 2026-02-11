@@ -1,4 +1,5 @@
 
+import base64
 from datetime import datetime
 from pathlib import Path
 import os
@@ -25,9 +26,9 @@ from mongo import close_mongo, init_mongo
 from analysis_mongo import (
     AnalysisLog,
     AnalysisSaveRequest,
+    DiaryOcrEntry,
     DrawingAnalysis,
     DrawingAnalysisSaveRequest,
-    DiaryOcrEntry,
 )
 from db_models import (
     Child,
@@ -79,7 +80,6 @@ from utils import (
 from s3_storage import (
     upload_profile_image_to_s3,
     upload_analysis_box_image_to_s3,
-    upload_diary_ocr_image_to_s3,
 )
 
 app = FastAPI()
@@ -346,35 +346,39 @@ async def get_drawing_analysis(
     }
 
 
-# --- 그림일기 OCR 저장 (diary_ocr: S3 이미지 + Mongo 텍스트) ---
-
-
 async def _call_aimodels_diary_ocr(
     *,
     contents: bytes,
     filename: str,
     content_type: str,
-    area: str,
 ) -> dict:
+    """AiModels /diary-ocr 호출 (그림일기 OCR 파이프라인)."""
     try:
         async with httpx.AsyncClient(timeout=180.0) as client:
             response = await client.post(
                 f"{AIMODELS_BASE_URL}/diary-ocr",
-                data={"area": area},
                 files={"file": (filename, contents, content_type)},
             )
         response.raise_for_status()
     except httpx.RequestError as exc:
+        print(f"[diary-ocr/extract] AiModels 연결 실패 (URL={AIMODELS_BASE_URL}/diary-ocr): {exc}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"message": "AI Models 서버에 연결할 수 없습니다.", "error": str(exc)},
+            detail={
+                "message": "AI 그림일기 서버에 연결할 수 없습니다. AiModels 서버가 실행 중인지, .env의 AIMODELS_BASE_URL이 맞는지 확인하세요.",
+                "error": str(exc),
+            },
         )
     except httpx.HTTPStatusError as exc:
+        print(f"[diary-ocr/extract] AiModels 응답 오류 status={exc.response.status_code} body={exc.response.text[:500]}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"message": "AI Models 서버 오류", "status_code": exc.response.status_code, "body": exc.response.text},
+            detail={
+                "message": "AI 그림일기 서버 오류. AiModels 터미널 로그를 확인하세요.",
+                "status_code": exc.response.status_code,
+                "body": (exc.response.text or "")[:1000],
+            },
         )
-
     try:
         data = response.json()
     except ValueError:
@@ -382,7 +386,6 @@ async def _call_aimodels_diary_ocr(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={"message": "AI Models 응답이 JSON이 아닙니다.", "body": response.text},
         )
-
     raw = data[0] if isinstance(data, list) and data else data
     if not isinstance(raw, dict):
         raise HTTPException(
@@ -392,120 +395,49 @@ async def _call_aimodels_diary_ocr(
     return raw
 
 
-@app.post("/diary-ocr", status_code=status.HTTP_201_CREATED)
-async def create_diary_ocr_entry(
-    file: UploadFile = File(...),
-    area: str = Form(""),
-    context=Depends(get_current_user_context),
-):
-    """그림일기 업로드 → OCR(별도 AI Models) → 원본 이미지는 S3 → 텍스트 JSON은 MongoDB(diary_ocr) 저장."""
-    user = context["user"]
+@app.post("/diary-ocr/extract")
+async def extract_diary_ocr_text(file: UploadFile = File(...)):
+    """그림일기 이미지 → AiModels diary_ocr_pipeline → 추출 결과만 반환 (저장 없음). 텍스트 추출하기 버튼용.
+    응답에 추출에 사용한 이미지를 image_data_url 로 포함해 카드 사진란에 쓸 수 있게 함."""
     if not file or not file.filename:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"message": "파일을 업로드해 주세요."})
-
     contents = await file.read()
     content_type = file.content_type or "image/jpeg"
-    if not area:
-        area = user.region or ""
-
-    # 1) S3 업로드(원본 이미지)
-    image_url = await upload_diary_ocr_image_to_s3(
-        contents,
-        user_id=user.id,
-        filename=file.filename,
-        content_type=content_type,
-    )
-
-    # 2) OCR/추출 (AI Models)
     extracted = await _call_aimodels_diary_ocr(
         contents=contents,
         filename=file.filename,
         content_type=content_type,
-        area=area or "도봉구",
     )
-
-    # 3) Mongo 저장
-    doc = DiaryOcrEntry(
-        user_id=user.id,
-        region=area or "",
-        image_url=image_url,
-        date=extracted.get("날짜", "") or "",
-        title=extracted.get("제목", "") or "",
-        original_text=extracted.get("원본", "") or "",
-        corrected_text=extracted.get("교정된_내용", "") or "",
-    )
-    await doc.insert()
-
-    return {
-        "id": str(doc.id),
-        "user_id": doc.user_id,
-        "created_at": doc.created_at.isoformat(),
-        "region": doc.region,
-        "image_url": doc.image_url,
-        "date": doc.date,
-        "title": doc.title,
-        "original_text": doc.original_text,
-        "corrected_text": doc.corrected_text,
-    }
+    if not isinstance(extracted, dict):
+        extracted = {}
+    out = dict(extracted)
+    # AiModels가 크롭된 이미지(image_data_url)를 보냈으면 그대로 사용, 없으면 업로드 원본을 data URL로 포함
+    if out.get("image_data_url"):
+        pass  # 이미 있음 (크롭 이미지)
+    else:
+        b64 = base64.b64encode(contents).decode("utf-8")
+        ct = (content_type or "image/jpeg").split(";")[0].strip() or "image/jpeg"
+        out["image_data_url"] = f"data:{ct};base64,{b64}"
+    return out
 
 
 @app.get("/diary-ocr")
-async def list_diary_ocr_entries(
-    user_id: int,
-    context=Depends(get_current_user_context),
-):
-    """내 그림일기 OCR 목록(최신순)."""
-    if context["user"].id != user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
-    docs = (
-        await DiaryOcrEntry.find(DiaryOcrEntry.user_id == user_id)
-        .sort([("created_at", -1)])
-        .to_list()
-    )
+async def get_diary_ocr_entries(context=Depends(get_current_user_context)):
+    """저장된 그림일기 OCR 목록 조회. 토큰의 로그인 사용자 기준으로만 조회."""
+    user_id = context["user"].id
+    entries = await DiaryOcrEntry.find(DiaryOcrEntry.user_id == user_id).sort(-DiaryOcrEntry.created_at).to_list()
     return [
         {
-            "id": str(d.id),
-            "user_id": d.user_id,
-            "created_at": d.created_at.isoformat(),
-            "region": d.region,
-            "image_url": d.image_url,
-            "date": d.date,
-            "title": d.title,
-            "original_text": d.original_text,
-            "corrected_text": d.corrected_text,
+            "id": str(doc.id),
+            "image_url": doc.image_url or "",
+            "corrected_text": doc.corrected_text or "",
+            "original_text": doc.original_text or "",
+            "date": doc.date or "",
+            "title": doc.title or "",
+            "created_at": doc.created_at.isoformat() if doc.created_at else "",
         }
-        for d in docs
+        for doc in entries
     ]
-
-
-@app.get("/diary-ocr/{entry_id}")
-async def get_diary_ocr_entry(
-    entry_id: str,
-    context=Depends(get_current_user_context),
-):
-    """그림일기 OCR 1건 상세."""
-    from beanie import PydanticObjectId
-
-    try:
-        oid = PydanticObjectId(entry_id)
-    except Exception:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-    doc = await DiaryOcrEntry.get(oid)
-    if not doc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-    if doc.user_id != context["user"].id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
-    return {
-        "id": str(doc.id),
-        "user_id": doc.user_id,
-        "created_at": doc.created_at.isoformat(),
-        "region": doc.region,
-        "image_url": doc.image_url,
-        "date": doc.date,
-        "title": doc.title,
-        "original_text": doc.original_text,
-        "corrected_text": doc.corrected_text,
-    }
 
 
 @app.post("/auth/signup", status_code=status.HTTP_201_CREATED)
