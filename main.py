@@ -80,6 +80,7 @@ from utils import (
 from s3_storage import (
     upload_profile_image_to_s3,
     upload_analysis_box_image_to_s3,
+    upload_diary_ocr_image_to_s3,
 )
 
 app = FastAPI()
@@ -434,10 +435,72 @@ async def get_diary_ocr_entries(context=Depends(get_current_user_context)):
             "original_text": doc.original_text or "",
             "date": doc.date or "",
             "title": doc.title or "",
+            "weather": doc.weather or "",
+            "child_name": doc.child_name or "",
             "created_at": doc.created_at.isoformat() if doc.created_at else "",
         }
         for doc in entries
     ]
+
+
+@app.post("/diary-ocr", status_code=status.HTTP_201_CREATED)
+async def save_diary_ocr_entry(
+    context=Depends(get_current_user_context),
+    file: UploadFile = File(...),
+    date: str = Form(""),
+    title: str = Form(""),
+    original_text: str = Form(""),
+    corrected_text: str = Form(""),
+    weather: str = Form(""),
+    child_id: str = Form(""),
+    child_name: str = Form(""),
+):
+    """그림일기 저장: 크롭 이미지를 S3에 업로드 후 MongoDB에 저장."""
+    if not file or not file.filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": "이미지 파일을 업로드해 주세요."},
+        )
+    user_id = context["user"].id
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": "빈 파일입니다."},
+        )
+    content_type = file.content_type or "image/jpeg"
+    image_url = await upload_diary_ocr_image_to_s3(
+        contents=contents,
+        user_id=user_id,
+        filename=file.filename,
+        content_type=content_type,
+    )
+    child_id_int = None
+    if child_id and child_id.strip().isdigit():
+        child_id_int = int(child_id.strip())
+    doc = DiaryOcrEntry(
+        user_id=user_id,
+        image_url=image_url,
+        date=(date or "").strip(),
+        title=(title or "").strip(),
+        original_text=(original_text or "").strip(),
+        corrected_text=(corrected_text or "").strip(),
+        weather=(weather or "").strip(),
+        child_id=child_id_int,
+        child_name=(child_name or "").strip(),
+    )
+    await doc.insert()
+    return {
+        "id": str(doc.id),
+        "image_url": doc.image_url,
+        "date": doc.date,
+        "title": doc.title,
+        "original_text": doc.original_text,
+        "corrected_text": doc.corrected_text,
+        "weather": doc.weather,
+        "child_name": doc.child_name,
+        "created_at": doc.created_at.isoformat() if doc.created_at else "",
+    }
 
 
 @app.post("/auth/signup", status_code=status.HTTP_201_CREATED)

@@ -82,16 +82,19 @@ class AnalysisLog(Document):
 class DiaryOcrEntry(Document):
     """
     그림일기 OCR 결과 1건.
-    - 이미지: S3 URL로 저장
+    - 이미지: S3 URL로 저장 (크롭 이미지)
     - 텍스트: 날짜/제목/내용 + 원본 텍스트 저장
     """
     user_id: Indexed(int) = Field(..., description="MySQL User ID")
     region: str = Field(default="", description="지역(사용자 선택)")
-    image_url: str = Field(default="", description="원본 그림일기 이미지 S3 URL")
+    image_url: str = Field(default="", description="그림일기 이미지 S3 URL (크롭)")
     date: str = Field(default="", description="추출된 날짜(YYYY-MM-DD)")
     title: str = Field(default="", description="추출된 제목")
     original_text: str = Field(default="", description="OCR 후처리 원본 텍스트")
     corrected_text: str = Field(default="", description="교정된 내용")
+    weather: str = Field(default="", description="날씨 (맑음/흐림/비/눈/바람)")
+    child_id: int | None = Field(default=None, description="등록 아이 ID (선택 시)")
+    child_name: str = Field(default="", description="아이 이름 (표시용)")
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         description="생성 시각",
