@@ -98,6 +98,12 @@ app.add_middleware(
 )
 
 
+@app.get("/health")
+def health_check():
+    """Docker health check endpoint"""
+    return {"status": "healthy"}
+
+
 @app.on_event("startup")
 def on_startup():
     init_db()
