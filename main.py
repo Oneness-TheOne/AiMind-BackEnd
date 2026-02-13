@@ -236,6 +236,8 @@ async def create_drawing_analysis(payload: DrawingAnalysisSaveRequest):
         analyzed_image_urls=analyzed_urls,
         psychological_interpretation=payload.psychological_interpretation,
         comparison=payload.comparison,
+        recommendations=getattr(payload, "recommendations", []) or [],
+        overall_psychology_result=getattr(payload, "overall_psychology_result", {}) or {},
     )
     await doc.insert()
     return {
@@ -268,6 +270,8 @@ async def list_drawing_analyses(
             "analyzed_image_urls": d.analyzed_image_urls,
             "psychological_interpretation": d.psychological_interpretation,
             "comparison": d.comparison,
+            "recommendations": getattr(d, "recommendations", []) or [],
+            "전체_심리_결과": getattr(d, "overall_psychology_result", {}) or {},
         }
         for d in docs
     ]
@@ -350,6 +354,8 @@ async def get_drawing_analysis(
         "analyzed_image_urls": doc.analyzed_image_urls,
         "psychological_interpretation": doc.psychological_interpretation,
         "comparison": comparison,
+        "recommendations": getattr(doc, "recommendations", []) or [],
+        "전체_심리_결과": getattr(doc, "overall_psychology_result", {}) or {},
     }
 
 

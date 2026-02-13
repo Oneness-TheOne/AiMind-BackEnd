@@ -34,6 +34,14 @@ class DrawingAnalysis(Document):
         description="심리해석 JSON { tree, house, man, woman } → { interpretation, analysis }",
     )
     comparison: dict[str, Any] = Field(default_factory=dict, description="또래 비교 등")
+    recommendations: list[Any] = Field(
+        default_factory=list,
+        description="추천 사항 [{ category, items }] (result 페이지와 동일)",
+    )
+    overall_psychology_result: dict[str, Any] = Field(
+        default_factory=dict,
+        description="전체 심리 결과 { 종합_요약, 인상적_분석, 구조적_분석_요약, 표상적_분석_종합 }",
+    )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         description="생성 시각",
@@ -54,6 +62,8 @@ class DrawingAnalysisSaveRequest(BaseModel):
     )
     psychological_interpretation: dict[str, Any] = Field(default_factory=dict)
     comparison: dict[str, Any] = Field(default_factory=dict)
+    recommendations: list[Any] = Field(default_factory=list)
+    overall_psychology_result: dict[str, Any] = Field(default_factory=dict)
 
 
 class AnalysisLog(Document):
